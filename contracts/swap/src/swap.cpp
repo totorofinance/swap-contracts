@@ -1,20 +1,21 @@
 #include <swap.hpp>
+#include <eosio/system.hpp>
 
 ACTION swap::createpair(name creator, extended_symbol token0, extended_symbol token1) {
     require_auth(creator);
-    check(_global.contract_status == 1, "Contract under maintenance.");
-    check(token0 != token1, "Can not submit with same token");
-    check(token0.get_contract() != LP_TOKEN_CONTRACT && token1.get_contract() != LP_TOKEN_CONTRACT, "Can not create lp token pool now");
+    check(get_config("status") == 1, "contract under maintenance");
+    check(token0 != token1, "can not submit with same token");
+    check(token0.get_contract() != LP_TOKEN_CONTRACT && token1.get_contract() != LP_TOKEN_CONTRACT, "can not create lp token pool now");
     auto supply0 = get_supply(token0.get_contract(), token0.get_symbol().code());
     auto supply1 = get_supply(token1.get_contract(), token1.get_symbol().code());
-    check(supply0.symbol == token0.get_symbol() && supply1.symbol == token1.get_symbol(), "Invalid symbol");
+    check(supply0.symbol == token0.get_symbol() && supply1.symbol == token1.get_symbol(), "invalid symbol");
 
     auto hash = str_hash(token0, token1);
     auto byhash_idx = _pairs.get_index<"byhash"_n>();
     auto itr = byhash_idx.find(hash);
     // check(false, itr->code.to_string() + ":" + std::to_string(hash) + "," + std::to_string(itr->hash()));
     while (itr != byhash_idx.end() && itr->hash() == hash) {
-        check(!is_same_pair(token0, token1, itr->token0, itr->token1), "Pair already exists");
+        check(!is_same_pair(token0, token1, itr->token0, itr->token1), "pair already exists");
         itr++;
     }
 
@@ -47,17 +48,17 @@ ACTION swap::createpair(name creator, extended_symbol token0, extended_symbol to
 }
 
 ACTION swap::removepair(uint64_t pair_id) {
-    require_auth(MANAGER_ACCOUNT);
-    check(_global.contract_status == 1, "Contract under maintenance.");
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
-    check(p_itr->total_liquidity == 0, "Unable to remove active pair.");
+    require_auth(get_manager());
+    check(get_config("status") == 1, "contract under maintenance");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
+    check(p_itr->total_liquidity == 0, "unable to remove active pair");
     
     auto now_time = current_time_point().sec_since_epoch();
     auto create_time = p_itr->created_time.to_time_point().sec_since_epoch();
-    // check(now_time - create_time > 60, "Please do not remove pair immediately."); // only admin can call now
+    // check(now_time - create_time > 60, "Please do not remove pair immediately"); // only admin can call now
 
     deposits_mi deposits(_self, pair_id);
-    check(deposits.begin() == deposits.end(), "Can not remove the pair which still have deposits.");
+    check(deposits.begin() == deposits.end(), "can not remove the pair which still have deposits");
 
     // remove lptoken
     action(permission_level{_self, "active"_n}, LP_TOKEN_CONTRACT, "destroy"_n, std::make_tuple(p_itr->code)).send();
@@ -68,10 +69,10 @@ ACTION swap::removepair(uint64_t pair_id) {
 ACTION swap::refund(name owner, uint64_t pair_id) {
     require_auth(owner);
 
-    check(_global.contract_status == 1, "Contract under maintenance.");
+    check(get_config("status") == 1, "contract under maintenance");
     deposits_mi deposits(_self, pair_id);
-    auto itr = deposits.require_find(owner.value, "You don't have any deposit.");
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
+    auto itr = deposits.require_find(owner.value, "you don't have any deposit");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
 
     if (itr->quantity0.amount > 0) {
         transfer_to(p_itr->token0.get_contract(), owner, itr->quantity0, std::string("Totoro cancel refund"));
@@ -82,35 +83,40 @@ ACTION swap::refund(name owner, uint64_t pair_id) {
     deposits.erase(itr);
 }
 
-ACTION swap::modifystatus(uint8_t contract_status, uint8_t mine_status, uint8_t push_oracle_status) {
-    require_auth(MANAGER_ACCOUNT);
-    _global.contract_status = contract_status;
-    _global.mine_status = mine_status;
-    _global.push_oracle_status = push_oracle_status;
-    _globals.set(_global, _self);
+ACTION swap::setconfig(name key, uint64_t value) {
+    require_auth(get_manager());
+    auto itr = _configs.find(name(key).value);
+    if (itr == _configs.end()) {
+        _configs.emplace(_self, [&](auto &a) {
+            a.key = key;
+            a.value = value;
+        });
+    } else {
+        _configs.modify(itr, same_payer, [&](auto &a) {
+            a.value = value;
+        });
+    }
 }
 
-ACTION swap::modifyfees(uint8_t trade_fee, uint8_t protocol_fee) {
-    require_auth(MANAGER_ACCOUNT);
-    _global.trade_fee = trade_fee;
-    _global.protocol_fee = protocol_fee;
-    _globals.set(_global, _self);
+ACTION swap::setname(name key, name value) {
+    setconfig(key, value.value);
 }
+
 
 void swap::handle_transfer(name from, name to, asset quantity, string memo) {
     name code = get_first_receiver();
-    if (from == _self || to != _self || from == name(MANAGER_ACCOUNT)) {
+    if (from == _self || to != _self || from == name("fix.ttr")) {
         return;
     }
     require_auth(from);
-    check(_global.contract_status == 1, "Contract under maintenance.");
+    check(get_config("status") == 1, "contract under maintenance");
     if (code == name(LP_TOKEN_CONTRACT)) {
         handle_rmliquidity(from, code, quantity);
         return;
     }
     
     std::map<string, string> dict = mappify(memo);
-    check(dict.size() >= 1, "Invaild memo");
+    check(dict.size() >= 1, "invaild memo");
     if (dict.find("deposit") != dict.end()) {
         string sid = dict.find("deposit")->second;
         uint64_t pid = strtoull(sid.c_str(), NULL, 10);
@@ -126,7 +132,7 @@ void swap::handle_transfer(name from, name to, asset quantity, string memo) {
         std::vector<uint64_t> ids = split_ids(path, "-");
         handle_swap(ids, from, code, quantity, min_amount);
     } else {
-        check(false, "Invalid memo");
+        check(false, "invalid memo");
     }
 }
 
@@ -136,11 +142,11 @@ void swap::handle_swap(std::vector<uint64_t> ids, name from, name contract, asse
         auto pair_id = ids[i];
         auto from_asset = to_asset;
         to_asset = swap_token(ids[i], from, from_asset.contract, from_asset.quantity);
-        if (_global.mine_status == 1) {
-             action(permission_level{_self, "active"_n}, MINE_CONTRACT, name("mine"), std::make_tuple(from, pair_id, from_asset, to_asset)).send();
+        if (get_config("mine.status") == 1) {
+             action(permission_level{_self, "active"_n}, get_account("mine.account"), name("mine"), std::make_tuple(from, pair_id, from_asset, to_asset)).send();
         }
     }
-    check(min_amount == 0 || to_asset.quantity.amount >= min_amount, "Returns less than expected");
+    check(min_amount == 0 || to_asset.quantity.amount >= min_amount, "returns less than expected");
 
     
     double amount_in_f = quantity.amount * 1.0 / pow(10, quantity.symbol.precision());
@@ -164,13 +170,13 @@ void swap::handle_rmliquidity(name owner, name contract, asset quantity) {
 
 void swap::remove_liquidity(name owner, uint64_t pair_id, uint64_t amount) {
     require_auth(owner);
-    check(_global.contract_status == 1, "Contract under maintenance.");
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
+    check(get_config("status") == 1, "contract under maintenance");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
     uint64_t reserve0 = p_itr->reserve0.amount;
     uint64_t reserve1 = p_itr->reserve1.amount;
     uint64_t amount0 = (uint128_t)reserve0 * amount / p_itr->total_liquidity;
     uint64_t amount1 = (uint128_t)reserve1 * amount / p_itr->total_liquidity;
-    check(amount0 > 0 && amount1 > 0 && amount0 <= reserve0 && amount1 <= reserve1, "Insufficient liquidity");
+    check(amount0 > 0 && amount1 > 0 && amount0 <= reserve0 && amount1 <= reserve1, "insufficient liquidity");
 
     _pairs.modify(p_itr, same_payer, [&](auto &a) {
         a.total_liquidity = safe_sub(a.total_liquidity, amount);
@@ -191,10 +197,10 @@ void swap::remove_liquidity(name owner, uint64_t pair_id, uint64_t amount) {
 }
 
 void swap::handle_deposit(uint64_t pair_id, name owner, name contract, asset quantity) {
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
 
     extended_symbol input(quantity.symbol, contract);
-    check(input == p_itr->token0 || input == p_itr->token1, "Invalid deposit.");
+    check(input == p_itr->token0 || input == p_itr->token1, "invalid deposit");
 
     deposits_mi deposits(_self, pair_id);
     auto itr = deposits.find(owner.value);
@@ -216,9 +222,9 @@ void swap::handle_deposit(uint64_t pair_id, name owner, name contract, asset qua
 
 void swap::addliquidity(name owner, uint64_t pair_id) {
     deposits_mi deposits(_self, pair_id);
-    auto d_itr = deposits.require_find(owner.value, "You don't have any deposit.");
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
-    check(d_itr->quantity0.amount > 0 && d_itr->quantity1.amount > 0, "You need have both tokens");
+    auto d_itr = deposits.require_find(owner.value, "you don't have any deposit");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
+    check(d_itr->quantity0.amount > 0 && d_itr->quantity1.amount > 0, "you need have both tokens");
 
     uint64_t amount0 = d_itr->quantity0.amount;
     uint64_t amount1 = d_itr->quantity1.amount;
@@ -230,14 +236,14 @@ void swap::addliquidity(name owner, uint64_t pair_id) {
     // calc amount0 and amount1
     if (reserve0 > 0 || reserve1 > 0) {
         uint128_t amount_temp = (uint128_t)amount0 * reserve1 / reserve0;
-        check(amount_temp < asset::max_amount, "Input amount too large");
+        check(amount_temp < asset::max_amount, "input amount too large");
         uint64_t amount1_matched = amount_temp;
         if (amount1_matched <= amount1) {
             amount1_refund = amount1 - amount1_matched;
             amount1 = amount1_matched;
         } else {
             amount_temp = (uint128_t)amount1 * reserve0 / reserve1;
-            check(amount_temp < asset::max_amount, "Input amount too large");
+            check(amount_temp < asset::max_amount, "input amount too large");
             uint64_t amount0_matched = amount_temp;
             amount0_refund = amount0 - amount0_matched;
             amount0 = amount0_matched;
@@ -249,7 +255,7 @@ void swap::addliquidity(name owner, uint64_t pair_id) {
     uint64_t total_liquidity = p_itr->total_liquidity;
     if (total_liquidity == 0) {
         liquidity = sqrt((uint128_t)amount0 * amount1);
-        check(liquidity >= MINIMUM_LIQUIDITY, "Insufficient liquidity minted");
+        check(liquidity >= MINIMUM_LIQUIDITY, "insufficient liquidity minted");
     } else {
         liquidity = std::min((uint128_t)amount0 * total_liquidity / reserve0, (uint128_t)amount1 * total_liquidity / reserve1);
     }
@@ -287,19 +293,19 @@ void swap::addliquidity(name owner, uint64_t pair_id) {
 } 
 
 extended_asset swap::swap_token(uint64_t pair_id, name from, name contract, asset quantity) {
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
     bool is_token0 = contract == p_itr->token0.get_contract() && quantity.symbol == p_itr->token0.get_symbol();
     bool is_token1 = contract == p_itr->token1.get_contract()  && quantity.symbol == p_itr->token1.get_symbol();
-    check(is_token0 || is_token1, "Contract or Symbol error");
+    check(is_token0 || is_token1, "contract or symbol error");
 
     uint64_t amount_in = quantity.amount;
-    uint64_t protocol_fee = (uint128_t)amount_in *  _global.protocol_fee / 10000;
-    uint64_t trade_fee = (uint128_t)amount_in *  _global.trade_fee / 10000;
+    uint64_t protocol_fee = (uint128_t)amount_in *  get_config("fee.protocol") / 10000;
+    uint64_t trade_fee = (uint128_t)amount_in *  get_config("fee.trade") / 10000;
     
-    check(trade_fee + protocol_fee > 0, "Swap amount too small");
+    check(trade_fee + protocol_fee > 0, "swap amount too small");
     if (protocol_fee > 0) {
         amount_in -= protocol_fee;
-        transfer_to(contract, FEE_ACCOUNT, asset(protocol_fee, quantity.symbol), string("Totoro swap protocol fee"));
+        transfer_to(contract, get_account("fee.account"), asset(protocol_fee, quantity.symbol), string("Totoro swap protocol fee"));
     }
     
     uint64_t reserve0 = p_itr->reserve0.amount;
@@ -310,14 +316,14 @@ extended_asset swap::swap_token(uint64_t pair_id, name from, name contract, asse
     uint64_t balance1;
     if (is_token0) {
         amount_out = get_output(amount_in, reserve0, reserve1, trade_fee);
-        check(amount_out >= 0, "Insufficient output amount");
+        check(amount_out >= 0, "insufficient output amount");
         output.contract = p_itr->token1.get_contract();
         output.quantity = asset(amount_out, p_itr->token1.get_symbol());
         balance0 = safe_add(reserve0, amount_in);
         balance1 = safe_sub(reserve1, amount_out);
     } else {
         amount_out = get_output(amount_in, reserve1, reserve0, trade_fee);
-        check(amount_out >= 0, "Insufficient output amount");
+        check(amount_out >= 0, "insufficient output amount");
         output.contract = p_itr->token0.get_contract();
         output.quantity = asset(amount_out, p_itr->token0.get_symbol());
         balance0 = safe_sub(reserve0, amount_out);
@@ -335,20 +341,21 @@ extended_asset swap::swap_token(uint64_t pair_id, name from, name contract, asse
     auto data = std::make_tuple(pair_id, from, token_in.get_contract(), quantity, token_out.get_contract(), output.quantity, asset(trade_fee + protocol_fee, quantity.symbol), trade_price, p_itr->total_liquidity, p_itr->reserve0, p_itr->reserve1);
     action(permission_level{_self, "active"_n}, LOG_CONTRACT, "swap"_n, data).send();
 
-    if (_global.push_oracle_status == 1) {
+    if (get_config("orac.status") == 1) {
         auto push_data = std::make_tuple(pair_id, reserve0, reserve1, balance0, balance1);
-        action(permission_level{_self, "active"_n}, ORACLE_CONTRACT, "update"_n, push_data).send();
+        action(permission_level{_self, "active"_n}, get_account("orac.account"), "update"_n, push_data).send();
     }
 
     return output;
 }
 
 void swap::update_pair(uint64_t pair_id, uint64_t balance0, uint64_t balance1, uint64_t reserve0, uint64_t reserve1) {
-    check(balance0 >= 0 && balance1 >= 0, "Update usertokens error");
-    auto p_itr = _pairs.require_find(pair_id, "Pair does not exist.");
+    check(balance0 >= 0 && balance1 >= 0, "update usertokens error");
+    auto p_itr = _pairs.require_find(pair_id, "pair does not exist");
     _pairs.modify(p_itr, same_payer, [&](auto &a) {
         a.reserve0.amount = balance0;
         a.reserve1.amount = balance1;
         a.updated_time = current_block_time();
     });
 }
+
