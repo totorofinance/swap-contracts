@@ -5,6 +5,8 @@ project(contracts)
 set(EOSIO_WASM_OLD_BEHAVIOR "Off")
 find_package(eosio.cdt)
 
-add_subdirectory(swap)
 add_subdirectory(logs)
+add_subdirectory(lptoken)
+add_subdirectory(swap)
+
 
