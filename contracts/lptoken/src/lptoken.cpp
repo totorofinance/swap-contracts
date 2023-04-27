@@ -93,6 +93,17 @@ uint64_t lptoken::sub_balance(const name &owner, const asset &value) {
     }
 
     if (owner != _self && owner != SWAP_CONTRACT) {
+        // update liquidity
+        lptokens lps(get_self(), value.symbol.code().raw());
+        auto lpi = lps.find(owner.value);
+        if (balance == value.amount) {
+            lps.erase(lpi);
+        } else {
+            // auto costs = get_costs(value.symbol.code(), value.amount);
+            lps.modify(lpi, owner, [&](auto &a) {
+                a.liquidity -= value.amount;
+            });
+        }
         // notify pools
         auto data = std::make_tuple(_self, value.symbol.code(), owner, balance, balance - value.amount);
         action(permission_level{_self, "active"_n}, LPNOTIFY_CONTRACT, "tokenchange"_n, data).send();
@@ -122,6 +133,19 @@ uint64_t lptoken::add_balance(const name &owner, const asset &value, const name 
     }
 
     if (owner != _self && owner != SWAP_CONTRACT) {
+        // update liquidity
+        lptokens lps(get_self(), value.symbol.code().raw());
+        auto lpi = lps.find(owner.value);
+        if (lpi == lps.end()) {
+            lps.emplace(ram_payer, [&](auto &a) {
+                a.owner = owner;
+                a.liquidity = value.amount;
+            });
+        } else {
+            lps.modify(lpi, same_payer, [&](auto &a) {
+                a.liquidity += value.amount;
+            });
+        }
         // notify pools
         auto data = std::make_tuple(_self, value.symbol.code(), owner, pre_amount, pre_amount + value.amount);
         action(permission_level{_self, "active"_n}, LPNOTIFY_CONTRACT, "tokenchange"_n, data).send();

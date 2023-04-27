@@ -71,8 +71,15 @@ private:
         uint64_t primary_key() const { return supply.symbol.code().raw(); }
     };
 
+    struct [[eosio::table]] lp_token {
+        name owner;
+        uint64_t liquidity;
+        uint64_t primary_key() const { return owner.value; }
+    };
+
     typedef eosio::multi_index<"accounts"_n, account> accounts;
     typedef eosio::multi_index<"stat"_n, currency_stats> stats;
+    typedef eosio::multi_index<"lptokens"_n, lp_token> lptokens;
 
     uint64_t sub_balance(const name &owner, const asset &value);
     uint64_t add_balance(const name &owner, const asset &value, const name &ram_payer);
